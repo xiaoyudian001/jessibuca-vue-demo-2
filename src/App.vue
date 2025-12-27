@@ -8,7 +8,7 @@ import JessibucaDemo from './components/JessibucaDemo.vue'
 export default {
   name: 'App',
   components: {
-    JessibucaDemo
+    JessibucaDemo: JessibucaDemo
   }
 }
 </script>

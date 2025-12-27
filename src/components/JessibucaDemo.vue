@@ -10,7 +10,7 @@
             style="width: 50px"
             type="number"
             ref="buffer"
-            value="0.2"
+            value="0.5"
             @change="changeBuffer"
         />
         <input
@@ -28,6 +28,7 @@
 
       </div>
       <div id="container" ref="container"></div>
+      <div class="err" v-if="err">{{ err }}</div>
       <div class="input">
         <div>输入URL：</div>
         <input
@@ -130,7 +131,12 @@ export default {
       useOffscreen: false,
       recording: false,
       recordType: 'webm',
-      scale: 0
+      scale: 0,
+      // 重连机制相关状态
+      reconnectCount: 0,
+      maxReconnectCount: 5,
+      reconnectTimeout: null,
+      baseReconnectInterval: 2000
     };
   },
   mounted() {
@@ -138,10 +144,14 @@ export default {
     window.onerror = (msg) => (this.err = msg);
   },
    async unmounted() {
+    // 清除重连计时器
+    this.clearReconnectTimeout();
     if(this.jessibuca){
       await this.jessibuca.destroy();
       this.jessibuca = null;
     }
+    // 清理全局错误监听
+    window.onerror = null;
   },
   methods: {
     create(options) {
@@ -198,13 +208,9 @@ export default {
         console.log("on fullscreen", msg);
       });
 
-      this.jessibuca.on("mute", function (msg) {
+      this.jessibuca.on("mute", (msg) => {
         console.log("on mute", msg);
-        _this.quieting = msg;
-      });
-
-      this.jessibuca.on("mute", function (msg) {
-        console.log("on mute2", msg);
+        this.quieting = msg;
       });
 
       this.jessibuca.on("audioInfo", function (msg) {
@@ -224,12 +230,21 @@ export default {
         console.log("videoInfo", info);
       });
 
-      this.jessibuca.on("error", function (error) {
+      this.jessibuca.on("error", (error) => {
         console.log("error", error);
+        this.err = `播放错误: ${error.message || error}`;
+        this.handleReconnect();
       });
 
-      this.jessibuca.on("timeout", function () {
+      this.jessibuca.on("timeout", () => {
         console.log("timeout");
+        this.handleReconnect();
+      });
+      
+      this.jessibuca.on("loadingTimeout", () => {
+        console.log("加载超时，可提示用户或重试");
+        this.err = "加载超时，请检查网络或流地址";
+        this.handleReconnect();
       });
 
       this.jessibuca.on('start', function () {
@@ -245,22 +260,55 @@ export default {
         }
         _this.performance = show;
       });
-      this.jessibuca.on('buffer', function (buffer) {
+      this.jessibuca.on('buffer', (buffer) => {
         console.log('buffer', buffer);
+        // 缓冲区状态处理
+        if (buffer < 0.1) {
+          console.log('缓冲区不足，考虑增加缓存');
+          // 可以根据缓冲区状态动态调整缓存时间
+          const currentBuffer = Number(this.$refs.buffer.value);
+          if (currentBuffer < 2) {
+            const newBuffer = Math.min(currentBuffer + 0.5, 2);
+            this.$refs.buffer.value = newBuffer;
+            this.jessibuca.setBufferTime(newBuffer);
+          }
+        }
       })
 
-      this.jessibuca.on('stats', function (stats) {
+      this.jessibuca.on('stats', (stats) => {
         console.log('stats', stats);
       })
 
-      this.jessibuca.on('kBps', function (kBps) {
+      this.jessibuca.on('kBps', (kBps) => {
         console.log('kBps', kBps);
+        // 带宽变化处理
+        this.speed = kBps;
+        // 根据带宽动态调整缓存策略
+        if (kBps < 500) {
+          console.log('低带宽，增加缓存');
+          const currentBuffer = Number(this.$refs.buffer.value);
+          if (currentBuffer < 2) {
+            const newBuffer = Math.min(currentBuffer + 0.5, 2);
+            this.$refs.buffer.value = newBuffer;
+            this.jessibuca.setBufferTime(newBuffer);
+          }
+        } else if (kBps > 2000) {
+          console.log('高带宽，减少缓存以降低延迟');
+          const currentBuffer = Number(this.$refs.buffer.value);
+          if (currentBuffer > 0.5) {
+            const newBuffer = Math.max(currentBuffer - 0.5, 0.5);
+            this.$refs.buffer.value = newBuffer;
+            this.jessibuca.setBufferTime(newBuffer);
+          }
+        }
       });
 
       this.jessibuca.on("play", () => {
         this.playing = true;
         this.loaded = true;
         this.quieting = this.jessibuca.isMute();
+        // 播放成功，重置重连状态
+        this.resetReconnectState();
       });
 
       this.jessibuca.on('recordingTimestamp', (ts) => {
@@ -290,6 +338,9 @@ export default {
       this.playing = false;
       this.err = "";
       this.performance = "";
+      // 停止播放时，清除重连计时器
+      this.clearReconnectTimeout();
+      this.resetReconnectState();
     },
     volumeChange() {
       this.jessibuca.setVolume(this.volume);
@@ -351,6 +402,43 @@ export default {
       this.jessibuca.setBufferTime(Number(this.$refs.buffer.value));
     },
 
+    // 处理重连逻辑
+    handleReconnect() {
+      if (!this.playing || this.reconnectCount >= this.maxReconnectCount) {
+        return;
+      }
+      
+      this.reconnectCount++;
+      // 指数退避策略：2^n * 1000ms，最大不超过30秒
+      const reconnectInterval = Math.min(
+        Math.pow(2, this.reconnectCount) * this.baseReconnectInterval,
+        30000
+      );
+      
+      console.log(`尝试重连 ${this.reconnectCount}/${this.maxReconnectCount}，间隔 ${reconnectInterval}ms`);
+      
+      this.clearReconnectTimeout();
+      this.reconnectTimeout = setTimeout(() => {
+        if (this.playing && this.$refs.playUrl.value) {
+          this.jessibuca.play(this.$refs.playUrl.value);
+        }
+      }, reconnectInterval);
+    },
+    
+    // 清除重连计时器
+    clearReconnectTimeout() {
+      if (this.reconnectTimeout) {
+        clearTimeout(this.reconnectTimeout);
+        this.reconnectTimeout = null;
+      }
+    },
+    
+    // 重置重连状态
+    resetReconnectState() {
+      this.reconnectCount = 0;
+      this.clearReconnectTimeout();
+    },
+    
     scaleChange() {
       this.jessibuca.setScaleMode(this.scale);
     },

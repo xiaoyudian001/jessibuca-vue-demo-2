@@ -113,7 +113,7 @@
     var $container = document.getElementById('container');
     var $destroy = document.getElementById('destroy');
 
-    var showOperateBtns = false; // 是否显示按钮
+    var showOperateBtns = true; // 是否显示按钮
     var forceNoOffscreen = true; //
     var jessibuca = null;
 
@@ -132,7 +132,7 @@
                 fullscreen: showOperateBtns,
                 screenshot: showOperateBtns,
                 play: showOperateBtns,
-                audio: false,
+                audio: showOperateBtns,
                 recorder: false
             },
             forceNoOffscreen: forceNoOffscreen,
